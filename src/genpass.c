@@ -1,4 +1,4 @@
-//by posixninja, geohot, and chronic
+//by posixninja, geohot, chronic, and #iphone-rce
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,7 +24,8 @@ uint64 u32_to_u64(uint32 msq, uint32 lsq) {
 
 uint64 hash_platform(const char* platform) {
   uint8 md[SHA_DIGEST_LENGTH];
-  SHA1((const unsigned char*) platform, strlen(platform), (unsigned char*) &md);
+  SHA1((const unsigned char*) platform, strlen(platform),
+      (unsigned char*) &md);
 
   uint64 hash = u32_to_u64(((md[0] << 24) | (md[1] << 16) | (md[2] << 8)
       | md[3]), ((md[4] << 24) | (md[5] << 16) | (md[6] << 8) | md[7]));
@@ -40,10 +41,10 @@ uint64 ramdisk_size(const char* ramdisk) {
   return (uint64) filestat.st_size;
 }
 
-void print_hex(uint8* hex, int size) {
+void keydump(uint8* key, int size) {
   int i = 0;
   for (i = 0; i < size; i++) {
-    printf("%02x", hex[i]);
+    printf("%02x", key[i]);
   }
   printf("\n");
 }
@@ -58,136 +59,109 @@ int compare(const uint32* a, const uint32* b) {
   return 0;
 }
 
-uint8* generate_passphrase(const char* platform, const char* ramdisk) {
+int main(int argc, char* argv[]) {
+  int i = 0;
+  int read = 0;
   SHA256_CTX ctx;
+  FILE* fd = NULL;
   uint64 salt[4];
+  uint64 totalSize = 0;
+  uint64 platformHash = 0;
   uint32 saltedHash[4];
-  uint64 totalSize = ramdisk_size(ramdisk);
-  uint64 platformHash = hash_platform(platform);
+  uint8* buffer = NULL;
+  uint8* passphrase = NULL;
+
+  if (argc < 3) {
+    fprintf(stderr, "usage: genpass <platform> <ramdisk> <filesystem>\n");
+    return -1;
+  }
+
+  totalSize = ramdisk_size(argv[2]);
+  platformHash = hash_platform(argv[1]);
 
   salt[0] = u32_to_u64(0xad79d29d, 0xe5e2ac9e);
   salt[1] = u32_to_u64(0xe6af2eb1, 0x9e23925b);
   salt[2] = u32_to_u64(0x3f1375b4, 0xbd88815c);
   salt[3] = u32_to_u64(0x3bdff4e5, 0x564a9f87);
 
-  FILE* fd = fopen(ramdisk, "rb");
+  fd = fopen(argv[2], "rb");
   if (!fd) {
-    fprintf(stderr, "error opening file: %s\n", ramdisk);
-    return NULL;
+    fprintf(stderr, "unable to open file %s\n", argv[2]);
+    return -1;
   }
 
-  int i = 0;
   for (i = 0; i < 4; i++) {
     salt[i] += platformHash;
     saltedHash[i] = ((uint32) (salt[i] % totalSize)) & 0xFFFFFE00;
   }
+
   qsort(&saltedHash, 4, 4, (int(*)(const void *, const void *)) &compare);
 
   SHA256_Init(&ctx);
   SHA256_Update(&ctx, salt, SHA256_DIGEST_LENGTH);
 
+  i = 0; //hash count
+  buffer = malloc(BUF_SIZE);
+  passphrase = malloc(SHA256_DIGEST_LENGTH);
   int count = 0;
-  uint8* buffer = malloc(BUF_SIZE);
-  uint8* passphrase = malloc(SHA256_DIGEST_LENGTH);
   while (count < totalSize) {
-    int bytes = fread(buffer, 1, BUF_SIZE, fd);
-    SHA256_Update(&ctx, buffer, bytes);
+    read = fread(buffer, 1, BUF_SIZE, fd);
+    SHA256_Update(&ctx, buffer, read);
 
     if (i < 4) { //some salts remain
       if (count >= (saltedHash[i] + 0x4000)) {
         i++;
 
-      } else if (count < saltedHash[i] && saltedHash[i] < (count + bytes)) {
+      } else if (count < saltedHash[i] && saltedHash[i] < (count + read)) {
         if ((saltedHash[i] + 0x4000) < count) {
           SHA256_Update(&ctx, buffer, saltedHash[i] - count);
 
         } else {
-          SHA256_Update(&ctx, buffer + (saltedHash[i] - count), ((bytes
-              - (saltedHash[i] - count)) < 0x4000) ? (bytes - (saltedHash[i]
-              - count)) : 0x4000);
+          SHA256_Update(&ctx, buffer + (saltedHash[i] - count),
+              ((read - (saltedHash[i] - count)) < 0x4000) ? (read
+                  - (saltedHash[i] - count)) : 0x4000);
         }
       }
     }
-    count += bytes;
+    count += read;
   }
 
   fclose(fd);
   SHA256_Final(passphrase, &ctx);
-  return passphrase;
-}
+  printf("passphrase: ");
+  keydump(passphrase, SHA256_DIGEST_LENGTH);
 
-uint8* decrypt_key(const char* filesystem, uint8* passphrase) {
-  int offset = 0x1D4;
-  EVP_CIPHER_CTX ctx;
-  uint8 data[0x30];
-  int i = 0;
-  int outlen, tmplen = 0;
-  FILE* fd = fopen(filesystem, "rb");
-  if (fd == NULL) {
-    fprintf(stderr, "error opening file: %s", filesystem);
-    return NULL;
+  if (buffer) {
+    free(buffer);
   }
 
-  uint8* out = malloc(0x30);
-  fseek(fd, offset, SEEK_SET);
+  if (argc == 4) {
+    fd = fopen(argv[3], "rb");
+    EVP_CIPHER_CTX ctx;
 
-  for (i = 0; i < 7; i++) {
-    if (fread(data, 1, 0x30, fd) <= 0) {
-      fprintf(stderr, "Error reading filesystem image");
-      free(out);
-      return NULL;
+    int offset = 0x1D4;
+    uint8 data[0x30];
+    uint8 out[0x30];
+    int outlen, tmplen;
+    int a;
+    for (a = 0; a < 7; a++) {
+      fseek(fd, offset, SEEK_SET);
+      offset += 0x268;
+      fread(data, 1, 0x30, fd);
+      EVP_CIPHER_CTX_init(&ctx);
+      EVP_DecryptInit_ex(&ctx, EVP_des_ede3_cbc(), NULL, passphrase,
+          &passphrase[24]);
+      EVP_DecryptUpdate(&ctx, out, &outlen, data, 0x30);
+      if (EVP_DecryptFinal_ex(&ctx, out + outlen, &tmplen)) {
+        printf("vfdecryptk: ");
+        keydump(out, 0x24);
+        break;
+      }
     }
-
-    EVP_CIPHER_CTX_init(&ctx);
-    EVP_DecryptInit_ex(&ctx, EVP_des_ede3_cbc(), NULL, passphrase,
-        &passphrase[24]);
-
-    EVP_DecryptUpdate(&ctx, out, &outlen, data, 0x30);
-    if (EVP_DecryptFinal_ex(&ctx, out + outlen, &tmplen)) {
-      return out;
-    }
-
-    offset += 0x268;
   }
 
-  fclose(fd);
-  return out;
-}
-
-int main(int argc, char* argv[]) {
-  uint8* pass = NULL;
-  uint8* key = NULL;
-
-  if (argc < 3) {
-    fprintf(stderr,
-        "usage: genpass <platform> <ramdisk.dmg> <filesystem.dmg>\n");
-    return -1;
-  }
-
-  char* platform = argv[1];
-  char* ramdisk = argv[2];
-  char* filesystem = argv[3];
-
-  pass = generate_passphrase(platform, ramdisk);
-  if (pass == NULL) {
-    fprintf(stderr, "unable to generate asr passphrase\n");
-    return -1;
-  }
-  printf("asr passphrase: ");
-  print_hex(pass, 0x20);
-
-  key = decrypt_key(filesystem, pass);
-  if (key == NULL) {
-    fprintf(stderr, "unable to decrypt vfdecrypt key\n");
-    return -1;
-  }
-  printf("vfdecrypt key: ");
-  print_hex(key, 0x24);
-
-  if (pass)
-    free(pass);
-  if (key)
-    free(key);
+  if (passphrase)
+    free(passphrase);
 
   return 0;
 }
