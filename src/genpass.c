@@ -12,17 +12,52 @@
 #define BUF_SIZE 0x100000
 #define SHA256_DIGEST_LENGTH 32
 
+#define FLIPENDIAN(x) flip_endian((unsigned char*)(&(x)), sizeof(x))
+
 typedef unsigned char uint8;
 typedef unsigned int uint32;
 typedef unsigned long long uint64;
 
-uint64 u32_to_u64(uint32 msq, uint32 lsq) {
+typedef struct {
+  uint8 sig[8];
+  uint32 version;
+  uint32 enc_iv_size;
+  uint32 unk1;
+  uint32 unk2;
+  uint32 unk3;
+  uint32 unk4;
+  uint32 unk5;
+  uint8 uuid[16];
+  uint32 blocksize;
+  uint64 datasize;
+  uint64 dataoffset;
+} encrcdsa_header;
+
+typedef struct {
+  uint32 unk1;
+  uint32 unk2;
+  uint32 unk3;
+  uint32 unk4;
+  uint32 unk5;
+} encrcdsa_block;
+
+static inline void flip_endian(unsigned char* x, int length) {
+  unsigned int i = 0;
+  unsigned char tmp = '\0';
+  for(i = 0; i < (length / 2); i++) {
+    tmp = x[i];
+    x[i] = x[length - i - 1];
+    x[length - i - 1] = tmp;
+  }
+}
+
+static inline uint64 u32_to_u64(uint32 msq, uint32 lsq) {
   uint64 ms = (uint64) msq;
   uint64 ls = (uint64) lsq;
   return ls | (ms << 32);
 }
 
-uint64 hash_platform(const char* platform) {
+static uint64 hash_platform(const char* platform) {
   uint8 md[SHA_DIGEST_LENGTH];
   SHA1((const unsigned char*) platform, strlen(platform), (unsigned char*) &md);
 
@@ -32,7 +67,7 @@ uint64 hash_platform(const char* platform) {
   return hash;
 }
 
-uint64 ramdisk_size(const char* ramdisk) {
+static uint64 ramdisk_size(const char* ramdisk) {
   struct stat filestat;
   if (stat(ramdisk, &filestat) < 0) {
     return 0;
@@ -84,27 +119,24 @@ uint8* generate_passphrase(const char* platform, const char* ramdisk) {
   qsort(&saltedHash, 4, 4, (int(*)(const void *, const void *)) &compare);
 
   SHA256_Init(&ctx);
-  SHA256_Update(&ctx, salt, SHA256_DIGEST_LENGTH);
+  SHA256_Update(&ctx, salt, 32);//SHA256_DIGEST_LENGTH);
 
   int count = 0;
   uint8* buffer = malloc(BUF_SIZE);
   uint8* passphrase = malloc(SHA256_DIGEST_LENGTH);
   while (count < totalSize) {
-    int bytes = fread(buffer, 1, BUF_SIZE, fd);
+    unsigned int bytes = fread(buffer, 1, BUF_SIZE, fd);
     SHA256_Update(&ctx, buffer, bytes);
 
-    if (i < 4) { //some salts remain
-      if (count >= (saltedHash[i] + 0x4000)) {
-        i++;
-
-      } else if (count < saltedHash[i] && saltedHash[i] < (count + bytes)) {
+    for (i = 0; i < 4; i++) { //some salts remain
+      if (count < saltedHash[i] && saltedHash[i] < (count + bytes)) {
         if ((saltedHash[i] + 0x4000) < count) {
           SHA256_Update(&ctx, buffer, saltedHash[i] - count);
-
+				
         } else {
           SHA256_Update(&ctx, buffer + (saltedHash[i] - count), ((bytes
-              - (saltedHash[i] - count)) < 0x4000) ? (bytes - (saltedHash[i]
-              - count)) : 0x4000);
+              - (saltedHash[i] - count)) < 0x4000) ? (bytes
+              - (saltedHash[i] - count)) : 0x4000);
         }
       }
     }
@@ -117,21 +149,42 @@ uint8* generate_passphrase(const char* platform, const char* ramdisk) {
 }
 
 uint8* decrypt_key(const char* filesystem, uint8* passphrase) {
-  int offset = 0x1D4;
+  int i = 0;
   EVP_CIPHER_CTX ctx;
   uint8 data[0x30];
-  int i = 0;
   int outlen, tmplen = 0;
+  
   FILE* fd = fopen(filesystem, "rb");
   if (fd == NULL) {
     fprintf(stderr, "error opening file: %s", filesystem);
     return NULL;
   }
-
+  
+  uint8* buffer = (uint8*) malloc(BUF_SIZE);
+  if(buffer == NULL) {
+  	fprintf(stderr, "unable to allocate memory\n");
+  	fclose(fd);
+  	return NULL;
+  }
+  
+  fread(buffer, 1, sizeof(encrcdsa_header), fd);
+  
+  uint32 blocks = 0;
+  fread(&blocks, 1, sizeof(uint32), fd);
+  FLIPENDIAN(blocks);
+  
+  fread(buffer, 1, sizeof(encrcdsa_block) * blocks, fd);
+  fread(buffer, 1, 0x80, fd);
+  
+  uint32 skip = 0;
+  fread(&skip, 1, sizeof(uint32), fd);
+  FLIPENDIAN(skip);
+  fread(buffer, 1, skip-3, fd);
+		
   uint8* out = malloc(0x30);
-  fseek(fd, offset, SEEK_SET);
+  free(buffer);
 
-  for (i = 0; i < 7; i++) {
+  for (i = 0; i < 0x10; i++) {
     if (fread(data, 1, 0x30, fd) <= 0) {
       fprintf(stderr, "Error reading filesystem image");
       free(out);
@@ -146,8 +199,8 @@ uint8* decrypt_key(const char* filesystem, uint8* passphrase) {
     if (EVP_DecryptFinal_ex(&ctx, out + outlen, &tmplen)) {
       return out;
     }
-
-    offset += 0x268;
+    
+    fseek(fd, 0x238, SEEK_CUR);
   }
 
   fclose(fd);
