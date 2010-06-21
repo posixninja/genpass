@@ -184,12 +184,14 @@ uint8* decrypt_key(const char* filesystem, uint8* passphrase) {
   uint8* out = malloc(0x30);
   free(buffer);
 
-  for (i = 0; i < 0x10; i++) {
+  for (i = 0; i < 0x20; i++) {
     if (fread(data, 1, 0x30, fd) <= 0) {
       fprintf(stderr, "Error reading filesystem image");
       free(out);
       return NULL;
     }
+    
+    if(data[0] == 0) break;
 
     EVP_CIPHER_CTX_init(&ctx);
     EVP_DecryptInit_ex(&ctx, EVP_des_ede3_cbc(), NULL, passphrase,
@@ -226,8 +228,8 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "unable to generate asr passphrase\n");
     return -1;
   }
-  printf("asr passphrase: ");
-  print_hex(pass, 0x20);
+  //printf("asr passphrase: ");
+  //print_hex(pass, 0x20);
 
   key = decrypt_key(filesystem, pass);
   if (key == NULL) {
